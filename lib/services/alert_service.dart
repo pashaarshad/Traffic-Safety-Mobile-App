@@ -10,6 +10,8 @@ class AlertService {
   String _currentVoiceAlert = '';
   AlertMode _lastActiveMode = AlertMode.scanning;
 
+  String get currentVoiceAlert => _currentVoiceAlert;
+
   AlertService() {
     _initTts();
   }
@@ -23,6 +25,11 @@ class AlertService {
       await _tts.setSpeechRate(0.55); // Easy to understand pacing
       await _tts.setVolume(_volume);
       await _tts.setPitch(1.0);
+      
+      // Intercept asynchronous speech synthesis errors to prevent platform thread crashes
+      _tts.setErrorHandler((error) {
+        print("TTS speech synthesis error caught: $error");
+      });
     } catch (e) {
       // Graceful fallback if TTS fails to initialize on desktop/simulator
       print("TTS Initialization warning: $e");
@@ -111,7 +118,7 @@ class AlertService {
   Future<void> stop() async {
     try {
       await _tts.stop();
-      Vibration.cancel();
+      await Vibration.cancel();
     } catch (e) {
       print("Error stopping alerts: $e");
     }

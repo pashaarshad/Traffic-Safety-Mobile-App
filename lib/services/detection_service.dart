@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math';
 import 'package:flutter/services.dart';
 import '../models/detected_object.dart';
 
@@ -10,7 +9,6 @@ class DetectionService {
   
   DetectionMode _mode = DetectionMode.simulation; // Defaults to simulation for cross-platform ease
   bool _isProcessing = false;
-  final _random = Random();
   
   // Streams the real-time detections
   final _controller = StreamController<List<DetectedObject>>.broadcast();
@@ -21,6 +19,7 @@ class DetectionService {
   int _simulationScenario = 0; // 0: Busy Street (Danger), 1: Receding (Safe), 2: Clear (Safe)
 
   DetectionMode get mode => _mode;
+  int get simulationScenario => _simulationScenario;
 
   void setMode(DetectionMode newMode) {
     _mode = newMode;

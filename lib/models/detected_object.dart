@@ -1,5 +1,3 @@
-import 'dart:math';
-
 enum DistanceCategory { veryClose, close, medium, far }
 
 class DetectedObject {
