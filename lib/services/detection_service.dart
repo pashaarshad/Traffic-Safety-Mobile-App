@@ -1,195 +1,206 @@
 import 'dart:async';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/detected_object.dart';
 
-enum DetectionMode { camera, simulation }
+enum AppRunMode {
+  LIVE_CAMERA,
+  SIMULATION
+}
 
-class DetectionService {
-  static const _channel = MethodChannel('traffic_safety/detection');
+class DetectionService with ChangeNotifier {
+  static const MethodChannel _platformChannel = MethodChannel('com.trafficsafety.app/yolo');
   
-  DetectionMode _mode = DetectionMode.simulation; // Defaults to simulation for cross-platform ease
-  bool _isProcessing = false;
+  AppRunMode _runMode = AppRunMode.SIMULATION;
+  bool _isDetecting = false;
+  List<DetectedObject> _currentDetections = [];
   
-  // Streams the real-time detections
-  final _controller = StreamController<List<DetectedObject>>.broadcast();
-  Stream<List<DetectedObject>> get detectionsStream => _controller.stream;
-
+  // Timer for simulating frames
   Timer? _simulationTimer;
-  int _simulationTicks = 0;
-  int _simulationScenario = 0; // 0: Busy Street (Danger), 1: Receding (Safe), 2: Clear (Safe)
+  double _simTime = 0.0;
+  String _simulationScenario = "street_busy"; // "street_clear" or "street_busy"
 
-  DetectionMode get mode => _mode;
-  int get simulationScenario => _simulationScenario;
+  AppRunMode get runMode => _runMode;
+  bool get isDetecting => _isDetecting;
+  List<DetectedObject> get currentDetections => _currentDetections;
+  String get simulationScenario => _simulationScenario;
 
-  void setMode(DetectionMode newMode) {
-    _mode = newMode;
-    if (_mode == DetectionMode.simulation) {
-      _startSimulation();
+  void setRunMode(AppRunMode mode) {
+    _runMode = mode;
+    if (_isDetecting) {
+      // Restart with the new mode
+      stopDetection();
+      startDetection();
+    }
+    notifyListeners();
+  }
+
+  void setSimulationScenario(String scenario) {
+    _simulationScenario = scenario;
+    notifyListeners();
+  }
+
+  void startDetection() {
+    if (_isDetecting) return;
+    _isDetecting = true;
+    notifyListeners();
+
+    if (_runMode == AppRunMode.SIMULATION) {
+      _startSimulationLoop();
     } else {
-      _stopSimulation();
+      _startNativeCameraLoop();
     }
   }
 
-  void setScenario(int scenarioIndex) {
-    _simulationScenario = scenarioIndex;
-    _simulationTicks = 0; // Reset scenario playback progress
+  void stopDetection() {
+    if (!_isDetecting) return;
+    _isDetecting = false;
+    _simulationTimer?.cancel();
+    _currentDetections = [];
+    notifyListeners();
   }
 
-  void start() {
-    if (_mode == DetectionMode.simulation) {
-      _startSimulation();
-    }
-  }
-
-  void stop() {
-    _stopSimulation();
-  }
-
-  // Called by the Camera Widget on each frame (CameraImage stream) in Live Mode
-  Future<void> processCameraImage(List<int> yuvBytes, int width, int height) async {
-    if (_mode == DetectionMode.simulation) return;
-    if (_isProcessing) return;
-    
-    _isProcessing = true;
-    try {
-      final Map<dynamic, dynamic> result = await _channel.invokeMethod('detectObjects', {
-        'imageBytes': yuvBytes,
-        'width': width,
-        'height': height,
-      });
-
-      final List<dynamic> rawDetections = result['detections'] as List<dynamic>? ?? [];
-      final List<DetectedObject> parsed = rawDetections.map((item) {
-        return DetectedObject.fromMap(item as Map<dynamic, dynamic>);
-      }).toList();
-
-      _controller.add(parsed);
-    } on PlatformException catch (e) {
-      print("Native object detection platform error: $e");
-      // Seamlessly fall back to simulated detections if platform execution is missing/unsupported
-      _emitFallbackDetections();
-    } catch (e) {
-      print("Object detection error: $e");
-    } finally {
-      _isProcessing = false;
-    }
-  }
-
-  void _startSimulation() {
-    _stopSimulation();
-    _simulationTimer = Timer.periodic(const Duration(milliseconds: 350), (timer) {
-      _simulationTicks++;
-      _generateScenarioDetections();
+  void _startSimulationLoop() {
+    _simTime = 0.0;
+    _simulationTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+      _simTime += 0.1;
+      _generateSimulatedFrame();
     });
   }
 
-  void _stopSimulation() {
-    _simulationTimer?.cancel();
-    _simulationTimer = null;
+  void _startNativeCameraLoop() async {
+    // In native camera loop, we send trigger requests to MainActivity.kt platform channel.
+    // In actual implementation, Android Camera2 API triggers frame capture, 
+    // FrameProcessor.kt processes the image via OpenCV, and YoloDetector.kt runs TFLite.
+    // It returns results asynchronously. Here we set up a loop that polls native results.
+    while (_isDetecting && _runMode == AppRunMode.LIVE_CAMERA) {
+      try {
+        final List<dynamic> results = await _platformChannel.invokeMethod('getLatestDetections');
+        _currentDetections = results.map((e) {
+          final map = Map<String, dynamic>.from(e);
+          return DetectedObject.fromJson(map);
+        }).toList();
+        notifyListeners();
+      } on PlatformException catch (e) {
+        debugPrint("Native Platform Channel Error: ${e.message}");
+        // Fallback to simulation if native channel fails (e.g. running on Windows)
+        _generateSimulatedFrame();
+      }
+      await Future.delayed(const Duration(milliseconds: 100)); // Poll at 10 FPS
+    }
   }
 
-  void _emitFallbackDetections() {
-    // Generate a simple transient warning box for the fallback
-    _controller.add([
-      DetectedObject(
-        id: 1,
-        label: 'car',
-        confidence: 0.82,
-        xMin: 0.35,
-        yMin: 0.40,
-        xMax: 0.65,
-        yMax: 0.85,
-        distance: DistanceCategory.close,
-        isApproaching: true,
-        estimatedDistanceMeters: 8.5,
-      )
-    ]);
-  }
+  /// Generates mock cars, bikes, and trucks that move on screen
+  void _generateSimulatedFrame() {
+    final List<DetectedObject> detections = [];
 
-  void _generateScenarioDetections() {
-    List<DetectedObject> currentDetections = [];
-
-    switch (_simulationScenario) {
-      case 0: // BUSY STREET (NOT SAFE)
-        // Vehicle 1 starts medium far and rapidly approaches
-        double phase1 = (_simulationTicks % 25) / 25.0; // 0.0 to 1.0
-        double heightRatio1 = 0.05 + (phase1 * 0.70); // Starts tiny, grows very large
-        double xMin1 = 0.40 - (phase1 * 0.15);
-        double yMin1 = 0.40;
-        double xMax1 = xMin1 + 0.15 + (phase1 * 0.30);
-        double yMax1 = yMin1 + heightRatio1;
-
-        DistanceCategory dist1 = DistanceCategory.far;
-        if (heightRatio1 > 0.48) {
-          dist1 = DistanceCategory.veryClose;
-        } else if (heightRatio1 > 0.28) {
-          dist1 = DistanceCategory.close;
-        } else if (heightRatio1 > 0.12) {
-          dist1 = DistanceCategory.medium;
-        }
-
-        currentDetections.add(DetectedObject(
-          id: 101,
-          label: 'car',
-          confidence: 0.88,
-          xMin: xMin1.clamp(0.0, 1.0),
-          yMin: yMin1.clamp(0.0, 1.0),
-          xMax: xMax1.clamp(0.0, 1.0),
-          yMax: yMax1.clamp(0.0, 1.0),
-          distance: dist1,
-          isApproaching: phase1 < 0.9, // Approaching until it's past the camera
-          estimatedDistanceMeters: (30.0 * (1.0 - phase1)).clamp(2.0, 50.0),
-        ));
-
-        // Add a second far-off bus approaching slowly
-        if (_simulationTicks % 25 > 5) {
-          double phase2 = ((_simulationTicks + 8) % 25) / 25.0;
-          double heightRatio2 = 0.08 + (phase2 * 0.20);
-          currentDetections.add(DetectedObject(
-            id: 102,
-            label: 'bus',
-            confidence: 0.74,
-            xMin: 0.25,
-            yMin: 0.42,
-            xMax: 0.38,
-            yMax: 0.42 + heightRatio2,
-            distance: heightRatio2 > 0.12 ? DistanceCategory.medium : DistanceCategory.far,
-            isApproaching: true,
-            estimatedDistanceMeters: 45.0 - (phase2 * 20),
-          ));
-        }
-        break;
-
-      case 1: // RECEDING TRAFFIC (SAFE)
-        // Vehicle is moving away (shrinking)
-        double phase = (_simulationTicks % 20) / 20.0;
-        double inversePhase = 1.0 - phase;
-        double heightRatio = 0.06 + (inversePhase * 0.35); // Shrinking
+    if (_simulationScenario == "street_busy") {
+      // Scenario: Busy Street. Vehicles are approaching the user.
+      
+      // Car 1: Approaching in the center lane
+      // Starts far away and gets closer. Loop every 8 seconds.
+      double car1Progress = (_simTime % 8.0) / 8.0; 
+      double car1Distance = 60.0 - (car1Progress * 58.0); // starts at 60m, stops at 2m
+      if (car1Distance > 1.5) {
+        // Compute bounding box coordinates [left, top, width, height]
+        // Center x is 0.35. Box width/height scales up as it gets closer
+        double scale = 1.0 / (car1Distance / 6.0); // grows larger as distance gets smaller
+        scale = scale.clamp(0.05, 0.7);
         
-        currentDetections.add(DetectedObject(
-          id: 201,
-          label: 'car',
-          confidence: 0.91,
-          xMin: 0.45 - (inversePhase * 0.05),
-          yMin: 0.45,
-          xMax: 0.55 + (inversePhase * 0.05),
-          yMax: 0.45 + heightRatio,
-          distance: heightRatio > 0.28 ? DistanceCategory.close : (heightRatio > 0.12 ? DistanceCategory.medium : DistanceCategory.far),
-          isApproaching: false, // Shrinking means receding/moving away
-          estimatedDistanceMeters: 5.0 + (phase * 35.0),
+        detections.add(DetectedObject(
+          label: "Car",
+          confidence: 0.94,
+          boundingBox: Rect.fromLTWH(
+            0.5 - (scale / 2), // centered horizontal
+            0.6 - (scale / 3), // vertical position
+            scale,
+            scale,
+          ),
+          estimatedDistance: car1Distance,
+          isApproaching: true,
         ));
-        break;
+      }
 
-      case 2: // CLEAR ROAD (SAFE)
-        // No vehicles detected
-        break;
+      // Motorcycle 1: Faster vehicle approaching. Loop every 5 seconds, offset by 3s.
+      double motoProgress = ((_simTime + 3.0) % 5.0) / 5.0;
+      double motoDistance = 70.0 - (motoProgress * 68.0);
+      if (motoDistance > 1.5) {
+        double scale = 0.6 / (motoDistance / 6.0);
+        scale = scale.clamp(0.03, 0.4);
+        detections.add(DetectedObject(
+          label: "Motorcycle",
+          confidence: 0.88,
+          boundingBox: Rect.fromLTWH(
+            0.2 - (scale / 2), // approaching on the left side
+            0.55 - (scale / 3),
+            scale,
+            scale * 1.2,
+          ),
+          estimatedDistance: motoDistance,
+          isApproaching: true,
+        ));
+      }
+
+      // Truck 1: A slow truck approaching. Loop every 12 seconds.
+      double truckProgress = ((_simTime + 6.0) % 12.0) / 12.0;
+      double truckDistance = 50.0 - (truckProgress * 45.0);
+      if (truckDistance > 3.0) {
+        double scale = 1.3 / (truckDistance / 6.0);
+        scale = scale.clamp(0.08, 0.8);
+        detections.add(DetectedObject(
+          label: "Truck",
+          confidence: 0.91,
+          boundingBox: Rect.fromLTWH(
+            0.75 - (scale / 2), // approaching on the right side
+            0.5 - (scale / 4),
+            scale,
+            scale * 1.3,
+          ),
+          estimatedDistance: truckDistance,
+          isApproaching: true,
+        ));
+      }
+    } else {
+      // Scenario: Clear Street. Vehicles are far away or moving away.
+      
+      // Car 2: A car moving away (receding). Loop every 10 seconds.
+      double car2Progress = (_simTime % 10.0) / 10.0;
+      double car2Distance = 20.0 + (car2Progress * 60.0); // starts at 20m, goes to 80m
+      double scale = 1.0 / (car2Distance / 6.0);
+      scale = scale.clamp(0.02, 0.25);
+      
+      detections.add(DetectedObject(
+        label: "Car",
+        confidence: 0.85,
+        boundingBox: Rect.fromLTWH(
+          0.3,
+          0.5,
+          scale,
+          scale,
+        ),
+        estimatedDistance: car2Distance,
+        isApproaching: false, // Receding
+      ));
+
+      // Pedestrian: Another pedestrian walking safely on the sidewalk
+      double pedProgress = (_simTime % 15.0) / 15.0;
+      double pedX = 0.85 - (pedProgress * 0.3); // walking left on the sidewalk
+      detections.add(DetectedObject(
+        label: "Pedestrian",
+        confidence: 0.96,
+        boundingBox: const Rect.fromLTWH(0.8, 0.45, 0.1, 0.25),
+        estimatedDistance: 12.0,
+        isApproaching: false,
+      ));
     }
 
-    _controller.add(currentDetections);
+    _currentDetections = detections;
+    notifyListeners();
   }
 
+  @override
   void dispose() {
-    _stopSimulation();
-    _controller.close();
+    _simulationTimer?.cancel();
+    super.dispose();
   }
 }

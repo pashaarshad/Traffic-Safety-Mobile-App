@@ -1,285 +1,368 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+import '../services/detection_service.dart';
 import '../widgets/glass_card.dart';
-import 'camera_screen.dart';
-import 'info_screen.dart';
-import 'settings_screen.dart';
 
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
-
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
-  late AnimationController _animController;
-  late Animation<double> _fadeAnimation;
-  late Animation<double> _slideAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _animController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1000),
-    );
-
-    _fadeAnimation = CurvedAnimation(
-      parent: _animController,
-      curve: const Interval(0.0, 0.7, curve: Curves.easeIn),
-    );
-
-    _slideAnimation = Tween<double>(begin: 40.0, end: 0.0).animate(
-      CurvedAnimation(
-        parent: _animController,
-        curve: const Interval(0.3, 1.0, curve: Curves.easeOutCubic),
-      ),
-    );
-
-    _animController.forward();
-  }
-
-  @override
-  void dispose() {
-    _animController.dispose();
-    super.dispose();
-  }
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF0F172A), // Premium sleek Slate-900 background
-      body: Stack(
+    final detectionService = Provider.of<DetectionService>(context);
+    
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        try {
+          const MethodChannel('com.trafficsafety.app/background')
+              .invokeMethod('sendToBackground');
+        } catch (e) {
+          debugPrint("Failed to send to background: $e");
+        }
+      },
+      child: Scaffold(
+        body: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: () {
+            if (detectionService.runMode == AppRunMode.LIVE_CAMERA) {
+              Navigator.pushNamed(context, '/camera');
+            }
+          },
+          child: Stack(
         children: [
-          // Elegant ambient background overlay
-          Positioned.fill(
-            child: Image.asset(
-              'assets/images/background_overlay.png',
-              fit: BoxFit.cover,
+          // Premium Glowing Space Background
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Color(0xFF0F172A), // Slate 900
+                  Color(0xFF020617), // Slate 950
+                  Color(0xFF1E1E38), // Custom Deep Indigo
+                ],
+              ),
             ),
           ),
-          // Additional dark overlay to elevate content legibility
-          Positioned.fill(
+          
+          // Glowing Ambient Orbs
+          Positioned(
+            top: -100,
+            right: -100,
             child: Container(
-              color: Colors.black.withOpacity(0.4),
+              width: 300,
+              height: 300,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF6366F1).withOpacity(0.15), // Indigo Glow
+                    blurRadius: 100,
+                    spreadRadius: 50,
+                  )
+                ],
+              ),
             ),
           ),
+          Positioned(
+            bottom: -50,
+            left: -50,
+            child: Container(
+              width: 250,
+              height: 250,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF10B981).withOpacity(0.12), // Emerald Glow
+                    blurRadius: 80,
+                    spreadRadius: 40,
+                  )
+                ],
+              ),
+            ),
+          ),
+          
           SafeArea(
             child: Center(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
-                child: AnimatedBuilder(
-                  animation: _animController,
-                  builder: (context, child) {
-                    return Opacity(
-                      opacity: _fadeAnimation.value,
-                      child: Transform.translate(
-                        offset: Offset(0, _slideAnimation.value),
-                        child: child,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    // Brand Icon & Title
+                    Icon(
+                      Icons.traffic_rounded,
+                      size: 80.0,
+                      color: const Color(0xFF38BDF8), // Light Blue
+                    ),
+                    const SizedBox(height: 16.0),
+                    const Text(
+                      "CROSSING ASSISTANT",
+                      style: TextStyle(
+                        fontSize: 28.0,
+                        fontWeight: FontWeight.w900,
+                        color: Colors.white,
+                        letterSpacing: 2.0,
                       ),
-                    );
-                  },
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      // Application Header / Logo Card
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 8.0),
+                    Text(
+                      "AI-Powered Real-Time Pedestrian Safety",
+                      style: TextStyle(
+                        fontSize: 16.0,
+                        color: Colors.white.withOpacity(0.6),
+                        fontWeight: FontWeight.w500,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 48.0),
+                    
+                    // Main Mode Selection Panel
+                    GlassCard(
+                      borderRadius: 24.0,
+                      padding: const EdgeInsets.all(20.0),
+                      child: Column(
+                        children: [
+                          const Text(
+                            "Select Engine Mode",
+                            style: TextStyle(
+                              fontSize: 18.0,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 16.0),
+                          
+                          // Simulation Card
+                          _buildModeCard(
+                            context: context,
+                            title: "Simulation Sandbox",
+                            subtitle: "Mock feeds, safety analysis presentation.",
+                            icon: Icons.splitscreen_rounded,
+                            activeColor: const Color(0xFF38BDF8),
+                            isSelected: detectionService.runMode == AppRunMode.SIMULATION,
+                            onTap: () {
+                              detectionService.setRunMode(AppRunMode.SIMULATION);
+                            },
+                          ),
+                          const SizedBox(height: 12.0),
+                          
+                          // Live Android Camera Card
+                          _buildModeCard(
+                            context: context,
+                            title: "Live Camera (Android)",
+                            subtitle: "Quantized YOLOv8 AI inference & OpenCV.",
+                            icon: Icons.videocam_rounded,
+                            activeColor: const Color(0xFF10B981),
+                            isSelected: detectionService.runMode == AppRunMode.LIVE_CAMERA,
+                            onTap: () {
+                              detectionService.setRunMode(AppRunMode.LIVE_CAMERA);
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 32.0),
+                    
+                    // Navigation Buttons Row
+                    Row(
+                      children: [
+                        if (detectionService.runMode != AppRunMode.LIVE_CAMERA) ...[
+                          Expanded(
+                            child: _buildNavButton(
+                              context: context,
+                              label: "LAUNCH HUD",
+                              icon: Icons.play_arrow_rounded,
+                              color: const Color(0xFF10B981),
+                              onTap: () {
+                                Navigator.pushNamed(context, '/camera');
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 16.0),
+                        ],
+                        Expanded(
+                          child: _buildNavButton(
+                            context: context,
+                            label: "SYSTEM INFO",
+                            icon: Icons.info_outline_rounded,
+                            color: const Color(0xFF6366F1),
+                            onTap: () {
+                              Navigator.pushNamed(context, '/info');
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (detectionService.runMode == AppRunMode.LIVE_CAMERA) ...[
+                      const SizedBox(height: 16.0),
                       GlassCard(
-                        padding: const EdgeInsets.all(28.0),
-                        child: Column(
-                          children: [
-                            Container(
-                              width: 120,
-                              height: 120,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: const Color(0x3310B981),
-                                    blurRadius: 30,
-                                    spreadRadius: 5,
-                                  )
-                                ],
-                              ),
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(60.0),
-                                child: Image.asset(
-                                  'assets/images/app_logo.png',
-                                  fit: BoxFit.cover,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 20),
-                            const Text(
-                              "GUARD CROSS",
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 32,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 3.0,
-                              ),
-                            ),
-                            const SizedBox(height: 5),
+                        borderRadius: 16.0,
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 14.0),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: const [
+                            Icon(Icons.touch_app_rounded, color: Colors.cyanAccent, size: 20.0),
+                            SizedBox(width: 8.0),
                             Text(
-                              "AI-Powered Crossing Assistant",
-                              textAlign: TextAlign.center,
+                              "TAP ANYWHERE TO LAUNCH HUD",
                               style: TextStyle(
-                                color: Colors.white.withOpacity(0.7),
-                                fontSize: 13,
-                                letterSpacing: 0.8,
-                                fontWeight: FontWeight.w500,
+                                color: Colors.cyanAccent,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13.0,
+                                letterSpacing: 1.0,
                               ),
                             ),
                           ],
                         ),
                       ),
-                      const SizedBox(height: 40),
-
-                      // Navigation Control Deck
-                      _buildNavigationButton(
-                        context,
-                        title: "LAUNCH PEDESTRIAN HUD",
-                        subtitle: "Start real-time safety analyzer",
-                        icon: Icons.camera_front_outlined,
-                        color: const Color(0xFF10B981), // Emerald green
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(builder: (context) => const CameraScreen()),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-
-                      _buildNavigationButton(
-                        context,
-                        title: "DEVELOPER LOGBOOK",
-                        subtitle: "Flowcharts, architectures & specs",
-                        icon: Icons.assignment_outlined,
-                        color: const Color(0xFF3B82F6), // Royal Blue
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(builder: (context) => const InfoScreen()),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-
-                      _buildNavigationButton(
-                        context,
-                        title: "CALIBRATION DECK",
-                        subtitle: "Fine-tune AI & system thresholds",
-                        icon: Icons.tune_rounded,
-                        color: const Color(0xFFF59E0B), // Golden yellow
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(builder: (context) => const SettingsScreen()),
-                        ),
-                      ),
-                      const SizedBox(height: 40),
-
-                      // Elegant Academic Subtitle
-                      Opacity(
-                        opacity: 0.6,
-                        child: Text(
-                          "DEPARTMENT OF COMPUTER SCIENCE & ENGINEERING\nFINAL YEAR CAPSTONE PROTOTYPE",
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: Colors.white.withOpacity(0.8),
-                            fontSize: 9,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 2.0,
-                            height: 1.5,
-                          ),
-                        ),
-                      ),
                     ],
-                  ),
+                    const SizedBox(height: 16.0),
+                    
+                    // Settings Floating Button
+                    TextButton.icon(
+                      icon: const Icon(Icons.settings_rounded, color: Colors.white54),
+                      label: const Text(
+                        "AI Calibration Settings",
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                      onPressed: () {
+                        Navigator.pushNamed(context, '/settings');
+                      },
+                    ),
+                  ],
                 ),
               ),
             ),
           ),
         ],
       ),
+    ),
+   ),
+  );
+ }
+
+  Widget _buildModeCard({
+    required BuildContext context,
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required Color activeColor,
+    required bool isSelected,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16.0),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16.0),
+          color: isSelected ? activeColor.withOpacity(0.15) : Colors.white.withOpacity(0.02),
+          border: Border.all(
+            color: isSelected ? activeColor : Colors.white.withOpacity(0.1),
+            width: isSelected ? 2.0 : 1.0,
+          ),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 14.0),
+        child: Row(
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: isSelected ? activeColor.withOpacity(0.2) : Colors.white.withOpacity(0.05),
+              ),
+              padding: const EdgeInsets.all(10.0),
+              child: Icon(
+                icon,
+                color: isSelected ? activeColor : Colors.white60,
+                size: 24.0,
+              ),
+            ),
+            const SizedBox(width: 16.0),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 16.0,
+                      fontWeight: FontWeight.bold,
+                      color: isSelected ? Colors.white : Colors.white70,
+                    ),
+                  ),
+                  const SizedBox(height: 2.0),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 12.0,
+                      color: Colors.white38,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (isSelected)
+              Icon(
+                Icons.check_circle_rounded,
+                color: activeColor,
+                size: 24.0,
+              ),
+          ],
+        ),
+      ),
     );
   }
 
-  Widget _buildNavigationButton(
-    BuildContext context, {
-    required String title,
-    required String subtitle,
+  Widget _buildNavButton({
+    required BuildContext context,
+    required String label,
     required IconData icon,
     required Color color,
     required VoidCallback onTap,
   }) {
     return Container(
-      width: double.infinity,
+      height: 54,
       decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16.0),
+        gradient: LinearGradient(
+          colors: [color, color.withRed(100).withBlue(100)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
         boxShadow: [
           BoxShadow(
-            color: color.withOpacity(0.12),
-            blurRadius: 15,
-            spreadRadius: 1,
-            offset: const Offset(0, 5),
-          )
+            color: color.withOpacity(0.3),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
         ],
       ),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(20.0),
-          child: GlassCard(
-            padding: const EdgeInsets.symmetric(vertical: 18.0, horizontal: 22.0),
-            borderColor: color.withOpacity(0.25),
-            fillColor: Colors.black.withOpacity(0.3),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(12.0),
-                  decoration: BoxDecoration(
-                    color: color.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(14.0),
-                    border: Border.all(
-                      color: color.withOpacity(0.4),
-                      width: 1.5,
-                    ),
-                  ),
-                  child: Icon(
-                    icon,
-                    color: color,
-                    size: 26,
-                  ),
+          borderRadius: BorderRadius.circular(16.0),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: Colors.white, size: 24.0),
+              const SizedBox(width: 8.0),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14.0,
+                  letterSpacing: 1.0,
                 ),
-                const SizedBox(width: 18),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 1.1,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        subtitle,
-                        style: TextStyle(
-                          color: Colors.white.withOpacity(0.6),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Icon(
-                  Icons.arrow_forward_ios_rounded,
-                  color: Colors.white.withOpacity(0.4),
-                  size: 16,
-                )
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),

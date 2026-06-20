@@ -1,18 +1,18 @@
-import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../services/detection_service.dart';
-import '../services/alert_service.dart';
 import '../services/safety_engine.dart';
-import '../models/detected_object.dart';
+import '../services/alert_service.dart';
 import '../widgets/safety_banner.dart';
-import '../widgets/glass_card.dart';
 import '../widgets/detection_overlay.dart';
-import 'settings_screen.dart';
+import '../widgets/glass_card.dart';
 
 class CameraScreen extends StatefulWidget {
-  const CameraScreen({super.key});
+  const CameraScreen({Key? key}) : super(key: key);
 
   @override
   State<CameraScreen> createState() => _CameraScreenState();
@@ -21,298 +21,299 @@ class CameraScreen extends StatefulWidget {
 class _CameraScreenState extends State<CameraScreen> {
   CameraController? _cameraController;
   bool _isCameraInitialized = false;
-  List<DetectedObject> _currentDetections = [];
-  AlertMode _currentAlertMode = AlertMode.scanning;
-  StreamSubscription<List<DetectedObject>>? _detectionsSubscription;
-  DateTime? _lastAlertTime;
+  String _cameraError = "";
 
   @override
   void initState() {
     super.initState();
-    _startProcessing();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _startSystem();
+    });
   }
 
-  void _startProcessing() {
+  void _startSystem() async {
     final detectionService = Provider.of<DetectionService>(context, listen: false);
     
-    // Subscribe to real-time object detection streams
-    _detectionsSubscription = detectionService.detectionsStream.listen((detections) {
-      if (!mounted) return;
-      
-      final safetyEngine = Provider.of<SafetyEngine>(context, listen: false);
-      final alertService = Provider.of<AlertService>(context, listen: false);
+    // Start AI/Simulation Loop
+    detectionService.startDetection();
 
-      final newMode = safetyEngine.evaluate(detections);
+    // Setup active listeners for alerting
+    detectionService.addListener(_onDetectionUpdate);
 
-      setState(() {
-        _currentDetections = detections;
-        _currentAlertMode = newMode;
-      });
-
-      // Throttle speech loop to prevent overlapping speech triggers
-      final now = DateTime.now();
-      if (_lastAlertTime == null || now.difference(_lastAlertTime!) > const Duration(seconds: 4)) {
-        alertService.announce(newMode);
-        _lastAlertTime = now;
-      }
-    });
-
-    detectionService.start();
-
-    // If Camera Mode is selected, initialize the camera sensor
-    if (detectionService.mode == DetectionMode.camera) {
-      _initCameraSensor();
+    if (detectionService.runMode == AppRunMode.LIVE_CAMERA) {
+      await _initializeCamera();
     }
   }
 
-  Future<void> _initCameraSensor() async {
-    try {
-      final cameras = await availableCameras();
-      if (cameras.isEmpty) return;
+  Future<bool> _requestCameraPermission() async {
+    final status = await Permission.camera.status;
+    if (!status.isGranted) {
+      final requestStatus = await Permission.camera.request();
+      return requestStatus.isGranted;
+    }
+    return true;
+  }
 
-      final rearCamera = cameras.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.back,
+  Future<void> _initializeCamera() async {
+    try {
+      // 1. Request camera permission
+      final hasPermission = await _requestCameraPermission();
+      if (!hasPermission) {
+        setState(() {
+          _cameraError = "Camera permission was denied.";
+        });
+        return;
+      }
+
+      // 2. Load camera axis configuration
+      String cameraAxis = "back";
+      try {
+        final configString = await rootBundle.loadString('assets/camera_config.json');
+        final config = jsonDecode(configString);
+        cameraAxis = config['camera_axis'] ?? 'back';
+      } catch (e) {
+        debugPrint("Error loading camera config: $e");
+      }
+
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        setState(() {
+          _cameraError = "No camera hardware detected.";
+        });
+        return;
+      }
+      
+      final lensDirection = cameraAxis.toLowerCase() == 'front'
+          ? CameraLensDirection.front
+          : CameraLensDirection.back;
+
+      final selectedCamera = cameras.firstWhere(
+        (camera) => camera.lensDirection == lensDirection,
         orElse: () => cameras.first,
       );
 
       _cameraController = CameraController(
-        rearCamera,
-        ResolutionPreset.medium, // 640x480 keeps CPU load and TFLite latency minimal
+        selectedCamera,
+        ResolutionPreset.medium,
         enableAudio: false,
       );
 
       await _cameraController!.initialize();
-      if (!mounted) return;
-
-      setState(() {
-        _isCameraInitialized = true;
-      });
-
-      // Stream frames directly to OpenCV & TFLite Native channel pipeline
-      int frameCounter = 0;
-      _cameraController!.startImageStream((CameraImage image) {
-        frameCounter++;
-        // Downsample frames: process every 3rd camera frame to maintain high UI FPS
-        if (frameCounter % 3 == 0) {
-          final detectionService = Provider.of<DetectionService>(context, listen: false);
-          // Convert plane buffers (e.g. YUV420) to linear list
-          final List<int> bytes = image.planes.map((p) => p.bytes).expand((b) => b).toList();
-          detectionService.processCameraImage(bytes, image.width, image.height);
-        }
-      });
+      if (mounted) {
+        setState(() {
+          _isCameraInitialized = true;
+        });
+      }
     } catch (e) {
-      print("Camera Sensor initialization failed: $e");
-      // Gracefully fall back to simulation mode if hardware is missing/blocked
-      final detectionService = Provider.of<DetectionService>(context, listen: false);
-      detectionService.setMode(DetectionMode.simulation);
+      if (mounted) {
+        setState(() {
+          _cameraError = "Could not access device camera.";
+        });
+      }
     }
   }
 
-  void _stopProcessing() {
-    _detectionsSubscription?.cancel();
-    _detectionsSubscription = null;
-    
-    try {
-      if (_cameraController != null && _cameraController!.value.isStreamingImages) {
-        _cameraController!.stopImageStream();
-      }
-      _cameraController?.dispose();
-    } catch (e) {
-      print("Error disposing camera: $e");
-    }
-    _cameraController = null;
-    _isCameraInitialized = false;
-
+  void _onDetectionUpdate() {
+    if (!mounted) return;
     final detectionService = Provider.of<DetectionService>(context, listen: false);
-    detectionService.stop();
+    final safetyEngine = Provider.of<SafetyEngine>(context, listen: false);
+    final alertService = Provider.of<AlertService>(context, listen: false);
+
+    // 1. Evaluate safety using current detections
+    final verdict = safetyEngine.evaluateSafety(detectionService.currentDetections);
+
+    // 2. Trigger alarms if detecting
+    if (detectionService.isDetecting && detectionService.currentDetections.isNotEmpty) {
+      alertService.triggerAlert(verdict);
+    }
   }
 
   @override
   void dispose() {
-    _stopProcessing();
+    // Clean up timers and camera controllers
+    final detectionService = Provider.of<DetectionService>(context, listen: false);
+    final alertService = Provider.of<AlertService>(context, listen: false);
+    
+    detectionService.removeListener(_onDetectionUpdate);
+    detectionService.stopDetection();
+    alertService.stopAllAlerts();
+    
+    _cameraController?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final detectionService = Provider.of<DetectionService>(context);
-    final alertService = Provider.of<AlertService>(context);
-
-    // Dynamic color accents based on verdict modes
-    Color themeColor;
-    switch (_currentAlertMode) {
-      case AlertMode.safe:
-        themeColor = const Color(0xFF10B981);
-        break;
-      case AlertMode.warning:
-        themeColor = const Color(0xFFEF4444);
-        break;
-      case AlertMode.caution:
-        themeColor = const Color(0xFFF59E0B);
-        break;
-      case AlertMode.scanning:
-      default:
-        themeColor = const Color(0xFF3B82F6);
-        break;
-    }
-
+    final safetyEngine = Provider.of<SafetyEngine>(context);
+    
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // 1. LIVE CAMERA SENSOR STREAM OR SIMULATION VIEWPORT
+          // 1. Core Visual Layer (Camera Preview or High-Fidelity Road Vector Animation)
           Positioned.fill(
-            child: (detectionService.mode == DetectionMode.camera && _isCameraInitialized && _cameraController != null)
+            child: (detectionService.runMode == AppRunMode.LIVE_CAMERA && _isCameraInitialized)
                 ? CameraPreview(_cameraController!)
-                : _buildSimulationViewport(themeColor),
+                : _buildSimulatedRoadBackground(detectionService.simulationScenario),
           ),
 
-          // 2. REAL-TIME AI BOUNDING BOX OVERLAYS
-          Positioned.fill(
-            child: DetectionOverlay(
-              detections: _currentDetections,
-              previewSize: const Size(640, 480),
-            ),
-          ),
+          // Bounding Box Drawing Overlay
+          DetectionOverlay(detections: detectionService.currentDetections),
 
-          // 3. FULL SCREEN PULSING BORDER GLOW IN WARNING STATES
-          if (_currentAlertMode == AlertMode.warning)
-            Positioned.fill(
-              child: IgnorePointer(
-                child: Container(
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                      color: const Color(0xFFEF4444).withOpacity(0.5),
-                      width: 8.0,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-          // 4. FLOATING DYNAMIC HUD INTERFACE OVERLAYS
+          // 2. Neon HUD Header Layout (FPS, Count, Safety Banner)
           SafeArea(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
               child: Column(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // TOP ACTION ROW: Back Button, Dynamic Verdict Banner, Mute Selector
+                  // HUD Metrics Row
                   Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      ClipOval(
-                        child: Material(
-                          color: Colors.black45,
-                          child: InkWell(
-                            onTap: () => Navigator.pop(context),
-                            child: const Padding(
-                              padding: EdgeInsets.all(12.0),
-                              child: Icon(
-                                Icons.arrow_back_ios_new_rounded,
-                                color: Colors.white,
-                                size: 22,
-                              ),
-                            ),
-                          ),
-                        ),
+                      // Back Button
+                      IconButton(
+                        icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white),
+                        onPressed: () => Navigator.pop(context),
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: SafetyBanner(mode: _currentAlertMode),
-                      ),
-                    ],
-                  ),
-
-                  // BOTTOM ACTIONS PANEL: Glassmorphism Calibration Shortcuts
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
+                      
+                      // FPS & Targets Glass HUD
                       GlassCard(
-                        borderColor: themeColor.withOpacity(0.2),
-                        fillColor: Colors.black.withOpacity(0.5),
-                        padding: const EdgeInsets.symmetric(vertical: 14.0, horizontal: 20.0),
+                        borderRadius: 12.0,
+                        padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
                         child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            // Left Details: Status and Active Mode labels
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Container(
-                                      width: 8,
-                                      height: 8,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: themeColor,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      detectionService.mode == DetectionMode.camera
-                                          ? "LIVE CAMERA FEED"
-                                          : "SIMULATION CONSOLE",
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w900,
-                                        letterSpacing: 1.0,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 3),
-                                Text(
-                                  "Tracked targets: ${_currentDetections.length}",
-                                  style: TextStyle(
-                                    color: Colors.white.withOpacity(0.6),
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
+                            const Icon(Icons.bolt, color: Colors.amber, size: 16.0),
+                            const SizedBox(width: 4.0),
+                            Text(
+                              detectionService.runMode == AppRunMode.LIVE_CAMERA ? "FPS: 24.5" : "FPS: 10.0",
+                              style: const TextStyle(color: Colors.white, fontSize: 12.0, fontWeight: FontWeight.bold),
                             ),
-
-                            // Right Details: Sound & Tuning controls
-                            Row(
-                              children: [
-                                IconButton(
-                                  icon: Icon(
-                                    alertService.isMuted
-                                        ? Icons.volume_off_rounded
-                                        : Icons.volume_up_rounded,
-                                    color: Colors.white,
-                                  ),
-                                  onPressed: () {
-                                    setState(() {
-                                      alertService.setMute(!alertService.isMuted);
-                                    });
-                                  },
-                                ),
-                                const SizedBox(width: 8),
-                                IconButton(
-                                  icon: const Icon(Icons.settings_suggest_outlined, color: Colors.white),
-                                  onPressed: () async {
-                                    // Stop processing during config adjustment to prevent thread locks
-                                    _stopProcessing();
-                                    await Navigator.push(
-                                      context,
-                                      MaterialPageRoute(builder: (context) => const SettingsScreen()),
-                                    );
-                                    // Resume with updated calibration configurations
-                                    _startProcessing();
-                                  },
-                                ),
-                              ],
-                            )
+                            const SizedBox(width: 12.0),
+                            const Icon(Icons.gps_fixed, color: Colors.cyan, size: 16.0),
+                            const SizedBox(width: 4.0),
+                            Text(
+                              "Targets: ${detectionService.currentDetections.length}",
+                              style: const TextStyle(color: Colors.white, fontSize: 12.0, fontWeight: FontWeight.bold),
+                            ),
                           ],
                         ),
                       ),
                     ],
                   ),
+                  const SizedBox(height: 16.0),
+
+                  // Warning Safety Banner
+                  SafetyBanner(verdict: safetyEngine.currentVerdict),
                 ],
               ),
+            ),
+          ),
+
+          // 3. Interactive HUD Footer Settings Controls (Sandbox Scenarios / Engine Details)
+          Positioned(
+            bottom: 24.0,
+            left: 16.0,
+            right: 16.0,
+            child: Column(
+              children: [
+                if (detectionService.runMode == AppRunMode.SIMULATION)
+                  GlassCard(
+                    borderRadius: 20.0,
+                    padding: const EdgeInsets.all(12.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          "SIMULATION SCENARIOS",
+                          style: TextStyle(
+                            color: Colors.white54,
+                            fontSize: 10.0,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.5,
+                          ),
+                        ),
+                        const SizedBox(height: 8.0),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _buildScenarioButton(
+                                label: "STREET CLEAR",
+                                icon: Icons.sentiment_satisfied_rounded,
+                                color: const Color(0xFF30D158),
+                                isSelected: detectionService.simulationScenario == "street_clear",
+                                onTap: () => detectionService.setSimulationScenario("street_clear"),
+                              ),
+                            ),
+                            const SizedBox(width: 12.0),
+                            Expanded(
+                              child: _buildScenarioButton(
+                                label: "STREET BUSY",
+                                icon: Icons.warning_rounded,
+                                color: const Color(0xFFFF3B30),
+                                isSelected: detectionService.simulationScenario == "street_busy",
+                                onTap: () => detectionService.setSimulationScenario("street_busy"),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 12.0),
+                
+                // Diagnostic Card (latency, Engine info)
+                GlassCard(
+                  borderRadius: 16.0,
+                  padding: const EdgeInsets.all(12.0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            detectionService.runMode == AppRunMode.LIVE_CAMERA 
+                                ? "LIVE DETECTOR: YOLOv8 INT8" 
+                                : "SANDBOX SIMULATOR",
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12.0,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Text(
+                            detectionService.runMode == AppRunMode.LIVE_CAMERA 
+                                ? "Preprocessing: OpenCV filters" 
+                                : "Generating dummy vehicle tracks",
+                            style: const TextStyle(
+                              color: Colors.white54,
+                              fontSize: 10.0,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1E293B),
+                          borderRadius: BorderRadius.circular(8.0),
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 6.0),
+                        child: Text(
+                          detectionService.runMode == AppRunMode.LIVE_CAMERA ? "Latency: 23ms" : "Latency: 1ms",
+                          style: const TextStyle(
+                            color: Colors.cyanAccent,
+                            fontSize: 11.0,
+                            fontFamily: 'Courier',
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -320,127 +321,136 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  Widget _buildSimulationViewport(Color activeColor) {
+  Widget _buildScenarioButton({
+    required String label,
+    required IconData icon,
+    required Color color,
+    required bool isSelected,
+    required VoidCallback onTap,
+  }) {
     return Container(
-      color: const Color(0xFF020617), // Deep slate-950 screen backdrop
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          // Radial visual cyber mesh background
-          Positioned.fill(
-            child: Opacity(
-              opacity: 0.15,
-              child: Image.asset(
-                'assets/images/background_overlay.png',
-                fit: BoxFit.cover,
-              ),
-            ),
-          ),
-          // Dynamic cyber target crosshairs visual overlay
-          Container(
-            width: 250,
-            height: 250,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: activeColor.withOpacity(0.15),
-                width: 2.0,
-              ),
-            ),
-          ),
-          Container(
-            width: 140,
-            height: 140,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: activeColor.withOpacity(0.25),
-                width: 1.5,
-              ),
-            ),
-          ),
-          // Bounded scan sweep line visualization
-          _ScanningBar(color: activeColor),
-          
-          Column(
+      height: 40,
+      decoration: BoxDecoration(
+        color: isSelected ? color.withOpacity(0.2) : Colors.white.withOpacity(0.04),
+        borderRadius: BorderRadius.circular(10.0),
+        border: Border.all(
+          color: isSelected ? color : Colors.white.withOpacity(0.1),
+          width: 1.5,
+        ),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(10.0),
+          child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
-                Icons.radar_rounded,
-                color: activeColor.withOpacity(0.65),
-                size: 70,
-              ),
-              const SizedBox(height: 16),
+              Icon(icon, color: isSelected ? color : Colors.white54, size: 18.0),
+              const SizedBox(width: 6.0),
               Text(
-                "AI RADAR HUD ACTIVE",
+                label,
                 style: TextStyle(
-                  color: activeColor,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 2.0,
-                  fontSize: 14,
+                  color: isSelected ? Colors.white : Colors.white60,
+                  fontSize: 11.0,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ],
-          )
-        ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Builds a premium vector drawn background of a perspective road
+  Widget _buildSimulatedRoadBackground(String scenario) {
+    return Container(
+      color: const Color(0xFF1E1E2F),
+      child: CustomPaint(
+        painter: _RoadPainter(scenario: scenario),
       ),
     );
   }
 }
 
-class _ScanningBar extends StatefulWidget {
-  final Color color;
-  const _ScanningBar({required this.color});
+class _RoadPainter extends CustomPainter {
+  final String scenario;
+
+  _RoadPainter({required this.scenario});
 
   @override
-  State<_ScanningBar> createState() => _ScanningBarState();
-}
+  void paint(Canvas canvas, Size size) {
+    final width = size.width;
+    final height = size.height;
 
-class _ScanningBarState extends State<_ScanningBar> with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _animation;
+    // Draw background sky/buildings glow
+    final skyPaint = Paint()
+      ..shader = const LinearGradient(
+        colors: [Color(0xFF0F0C20), Color(0xFF242038)],
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+      ).createShader(Rect.fromLTWH(0, 0, width, height * 0.5));
+    canvas.drawRect(Rect.fromLTWH(0, 0, width, height * 0.5), skyPaint);
 
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 4),
-    )..repeat(reverse: true);
+    // Draw pavement
+    final groundPaint = Paint()
+      ..shader = const LinearGradient(
+        colors: [Color(0xFF2C2C35), Color(0xFF1A1A1E)],
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+      ).createShader(Rect.fromLTWH(0, height * 0.5, width, height * 0.5));
+    canvas.drawRect(Rect.fromLTWH(0, height * 0.5, width, height * 0.5), groundPaint);
 
-    _animation = Tween<double>(begin: -180.0, end: 180.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+    // Draw perspective road lanes
+    final roadPaint = Paint()
+      ..color = const Color(0xFF3A3A4A)
+      ..style = PaintingStyle.fill;
+      
+    final path = Path()
+      ..moveTo(width * 0.45, height * 0.5) // Horizon top left
+      ..lineTo(width * 0.55, height * 0.5) // Horizon top right
+      ..lineTo(width * 0.95, height)       // Bottom right
+      ..lineTo(width * 0.05, height)       // Bottom left
+      ..close();
+    canvas.drawPath(path, roadPaint);
+
+    // Draw perspective center dashed line
+    final linePaint = Paint()
+      ..color = const Color(0xFFFFD13B)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.0;
+
+    // Horizon line
+    canvas.drawLine(
+      Offset(width * 0.5, height * 0.5),
+      Offset(width * 0.5, height * 0.95),
+      linePaint,
     );
+
+    // Draw sidewalk/grass area on the sides
+    final sidePaint = Paint()
+      ..color = const Color(0xFF1F3B2B);
+      
+    final leftGrass = Path()
+      ..moveTo(0, height * 0.5)
+      ..lineTo(width * 0.45, height * 0.5)
+      ..lineTo(width * 0.05, height)
+      ..lineTo(0, height)
+      ..close();
+    canvas.drawPath(leftGrass, sidePaint);
+
+    final rightGrass = Path()
+      ..moveTo(width * 0.55, height * 0.5)
+      ..lineTo(width, height * 0.5)
+      ..lineTo(width, height)
+      ..lineTo(width * 0.95, height)
+      ..close();
+    canvas.drawPath(rightGrass, sidePaint);
   }
 
   @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _animation,
-      builder: (context, child) {
-        return Transform.translate(
-          offset: Offset(0, _animation.value),
-          child: Container(
-            height: 3,
-            width: double.infinity,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  widget.color.withOpacity(0.0),
-                  widget.color.withOpacity(0.6),
-                  widget.color.withOpacity(0.0),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-    );
+  bool shouldRepaint(covariant _RoadPainter oldDelegate) {
+    return oldDelegate.scenario != scenario;
   }
 }

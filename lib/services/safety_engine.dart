@@ -1,48 +1,52 @@
+import 'package:flutter/material.dart';
 import '../models/detected_object.dart';
-import 'alert_service.dart';
 
-class SafetyEngine {
-  // Configurable thresholds (can be updated from settings screen)
-  double confidenceThreshold = 0.40;
-  double veryCloseRatio = 0.48; // Bounding box occupies > 48% height
-  double closeRatio = 0.28;     // Bounding box occupies > 28% height
-  double mediumRatio = 0.12;    // Bounding box occupies > 12% height
+class SafetyEngine with ChangeNotifier {
+  String _currentVerdict = "SAFE"; // SAFE or DANGER
+  double _dangerThresholdDistance = 15.0; // In meters
+  
+  String get currentVerdict => _currentVerdict;
+  double get dangerThresholdDistance => _dangerThresholdDistance;
 
-  AlertMode evaluate(List<DetectedObject> detections) {
-    // Filter out irrelevant categories and low-confidence boxes
-    final activeVehicles = detections.where((obj) {
-      final isVehicle = ['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'vehicle', 'van'].contains(obj.label.toLowerCase());
-      return isVehicle && obj.confidence >= confidenceThreshold;
-    }).toList();
+  void updateDangerThreshold(double value) {
+    _dangerThresholdDistance = value;
+    notifyListeners();
+  }
 
-    if (activeVehicles.isEmpty) {
-      return AlertMode.safe;
+  /// Evaluates safety and returns a verdict.
+  /// If any vehicle is closer than 5 meters, OR
+  /// if a vehicle is between 5 and threshold meters AND is approaching,
+  /// then it returns DANGER. Otherwise it is SAFE.
+  String evaluateSafety(List<DetectedObject> detections) {
+    if (detections.isEmpty) {
+      _currentVerdict = "SAFE";
+      notifyListeners();
+      return _currentVerdict;
     }
 
-    // Rule 1: Any vehicle VERY CLOSE is extreme danger
-    final hasVeryClose = activeVehicles.any((v) => v.distance == DistanceCategory.veryClose);
-    if (hasVeryClose) {
-      return AlertMode.warning;
+    bool hasDanger = false;
+    for (var detection in detections) {
+      // Skip non-vehicle detections for crossing verdicts (like other pedestrians)
+      if (detection.label.toLowerCase() == 'pedestrian') {
+        continue;
+      }
+
+      final distance = detection.estimatedDistance;
+      final isApproaching = detection.isApproaching;
+
+      if (distance < 5.0) {
+        // Cars under 5m are immediately dangerous
+        hasDanger = true;
+        break;
+      } else if (distance < _dangerThresholdDistance && isApproaching) {
+        // Cars within threshold moving towards the pedestrian are dangerous
+        hasDanger = true;
+        break;
+      }
     }
 
-    // Rule 2: Any CLOSE vehicle that is approaching is extremely dangerous
-    final hasCloseApproaching = activeVehicles.any((v) => v.distance == DistanceCategory.close && v.isApproaching);
-    if (hasCloseApproaching) {
-      return AlertMode.warning;
-    }
-
-    // Rule 3: Multiple MEDIUM vehicles approaching represents high risk
-    final approachingMediumCount = activeVehicles.where((v) => v.distance == DistanceCategory.medium && v.isApproaching).length;
-    if (approachingMediumCount >= 2) {
-      return AlertMode.warning;
-    }
-
-    // Rule 4: Single MEDIUM vehicle approaching calls for Caution
-    if (approachingMediumCount == 1) {
-      return AlertMode.caution;
-    }
-
-    // Rule 5: If there are vehicles but they are far away or moving away (receding)
-    return AlertMode.safe;
+    _currentVerdict = hasDanger ? "DANGER" : "SAFE";
+    notifyListeners();
+    return _currentVerdict;
   }
 }
