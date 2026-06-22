@@ -96,11 +96,18 @@ class MainActivity : FlutterActivity() {
                                 }
                                 latestDetections = results
                                 rgbMat.release()
+
+                                // Return the results to Flutter on the main thread
+                                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                    result.success(results)
+                                }
                             } catch (e: Exception) {
                                 Log.e("MainActivity", "Error processing frame in background thread: ${e.message}")
+                                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                    result.error("PROCESSING_ERROR", e.message, null)
+                                }
                             }
                         }
-                        result.success(latestDetections)
                     } else {
                         result.error("INVALID_ARGUMENTS", "Missing arguments for processFrame", null)
                     }

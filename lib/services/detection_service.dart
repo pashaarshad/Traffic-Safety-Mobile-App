@@ -12,7 +12,7 @@ enum AppRunMode {
 class DetectionService with ChangeNotifier {
   static const MethodChannel _platformChannel = MethodChannel('com.trafficsafety.app/yolo');
   
-  AppRunMode _runMode = AppRunMode.SIMULATION;
+  AppRunMode _runMode = AppRunMode.LIVE_CAMERA;
   bool _isDetecting = false;
   List<DetectedObject> _currentDetections = [];
   
