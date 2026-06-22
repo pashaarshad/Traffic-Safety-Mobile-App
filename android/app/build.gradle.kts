@@ -32,6 +32,16 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    aaptOptions {
+        noCompress("tflite")
+    }
+}
+
+dependencies {
+    implementation("com.google.ai.edge.litert:litert:1.4.0")
+    implementation("com.google.ai.edge.litert:litert-gpu:1.4.0")
+    implementation("org.opencv:opencv:4.9.0")
 }
 
 kotlin {
