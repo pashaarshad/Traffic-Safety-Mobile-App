@@ -102,6 +102,7 @@ class DetectionService with ChangeNotifier {
     required int vRowStride,
     required int uPixelStride,
     required int vPixelStride,
+    int sensorOrientation = 90,
   }) async {
     if (!_isDetecting || _runMode != AppRunMode.LIVE_CAMERA) return;
     try {
@@ -116,6 +117,7 @@ class DetectionService with ChangeNotifier {
         'vRowStride': vRowStride,
         'uPixelStride': uPixelStride,
         'vPixelStride': vPixelStride,
+        'sensorOrientation': sensorOrientation,
       });
       _currentDetections = results.map((e) {
         final map = Map<String, dynamic>.from(e);

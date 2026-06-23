@@ -100,7 +100,7 @@ class YoloDetector(private val assetManager: AssetManager) {
                 val label = when (maxClassId) {
                     0 -> "Pedestrian"
                     1 -> "Bicycle"
-                    2 -> "car"
+                    2 -> "Car"
                     3 -> "Motorcycle"
                     5 -> "Truck" // Map bus/large vehicle to Truck
                     7 -> "Truck"

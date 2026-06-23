@@ -1,0 +1,98 @@
+# Fix Build Errors, Enable Object Detection & Build v6.apk
+
+## Problem Summary
+
+The Flutter APK build fails due to:
+1. **Corrupted Kotlin incremental compilation caches** — `audioplayers_android:compileReleaseKotlin` fails with `PersistentEnumerator`/`PersistentMapImpl` errors
+2. **Dependency conflicts** — `org.tensorflow:tensorflow-lite:2.14.0` and `org.opencv:opencv:4.9.0` are incorrect Maven coordinates causing resolution failures
+3. **Kotlin version mismatch** — Kotlin `2.3.20` in `settings.gradle.kts` is too new and causes compatibility issues with some plugin dependencies
+
+## Proposed Changes
+
+### 1. Fix Build Configuration
+
+---
+
+#### [MODIFY] [build.gradle.kts](file:///d:/Traffic%20Safety%20Mobile%20App/android/app/build.gradle.kts)
+
+**Changes:**
+- Replace `org.tensorflow:tensorflow-lite:2.14.0` with `org.tensorflow:tensorflow-lite:2.16.1` (latest stable)
+- Replace `org.tensorflow:tensorflow-lite-gpu:2.14.0` with `org.tensorflow:tensorflow-lite-gpu:2.16.1`
+- Remove `org.opencv:opencv:4.9.0` (incorrect Maven coordinate — OpenCV for Android is distributed as a module, not via Maven Central with this coordinate)
+- Add OpenCV as a local `.aar` or use the correct coordinate `org.opencv:opencv-android:4.9.0` OR remove it entirely since the Kotlin code imports `org.opencv.core.*` which may need to be distributed via a local lib
+- Actually, looking at the code more carefully, OpenCV is used in `FrameProcessor.kt`. The correct Maven coordinate is **not** `org.opencv:opencv:4.9.0`. We'll need to use `com.quickbirdstudios:opencv:4.5.3.0` (community artifact) or bundle OpenCV as a local dependency. The simplest fix is to use `implementation("com.quickbirdstudios:opencv:4.5.3.0")` which works from Maven Central.
+
+**However**, a more robust approach is to drop the OpenCV dependency entirely and rewrite `FrameProcessor.kt` to use pure Android/Java APIs (Bitmap operations) for YUV-to-RGB conversion and image preprocessing. This avoids the entire OpenCV loading problem and reduces APK size.
+
+---
+
+#### [MODIFY] [gradle.properties](file:///d:/Traffic%20Safety%20Mobile%20App/android/gradle.properties)
+
+**Changes:**
+- Add `kotlin.incremental=false` to disable incremental compilation (fixes cache corruption)
+- Increase JVM memory to handle the large model compilation
+
+---
+
+#### [MODIFY] [settings.gradle.kts](file:///d:/Traffic%20Safety%20Mobile%20App/android/settings.gradle.kts)
+
+**Changes:**
+- Downgrade Kotlin version from `2.3.20` to `2.1.20` (latest stable compatible with Gradle 9.1)
+
+---
+
+#### [MODIFY] [build.gradle.kts (project-level)](file:///d:/Traffic%20Safety%20Mobile%20App/android/build.gradle.kts)
+
+**Changes:**
+- Clean up the duplicate `subprojects` blocks
+- Simplify the compileSdk override
+
+---
+
+### 2. Rewrite FrameProcessor.kt Without OpenCV
+
+#### [MODIFY] [FrameProcessor.kt](file:///d:/Traffic%20Safety%20Mobile%20App/android/app/src/main/kotlin/com/trafficsafety/traffic_safety_app/FrameProcessor.kt)
+
+**Changes:**
+- Remove all OpenCV imports and usage
+- Replace YUV-to-RGB conversion with pure Android `Bitmap`/`ImageFormat` operations
+- Replace blur detection with variance of Laplacian using Android `RenderScript` or simpler pixel analysis
+- Replace resize with `Bitmap.createScaledBitmap`
+- Return `ByteBuffer` for TFLite input (same interface)
+
+---
+
+#### [MODIFY] [MainActivity.kt](file:///d:/Traffic%20Safety%20Mobile%20App/android/app/src/main/kotlin/com/trafficsafety/traffic_safety_app/MainActivity.kt)
+
+**Changes:**
+- Remove OpenCV initialization (`OpenCVLoader.initDebug()`)
+- Update `FrameProcessor` constructor (no longer needs AssetManager for OpenCV)
+- Adjust `preprocessFrame` return type (returns `Pair<ByteBuffer, Bitmap>` instead of `Pair<ByteBuffer, Mat>`)
+
+---
+
+### 3. Fix Detection Objects Label Case
+
+#### [MODIFY] [YoloDetector.kt](file:///d:/Traffic%20Safety%20Mobile%20App/android/app/src/main/kotlin/com/trafficsafety/traffic_safety_app/YoloDetector.kt)
+
+**Changes:**
+- Fix label `"car"` → `"Car"` for consistency with the Dart-side safety engine expectations
+
+---
+
+### 4. Clean Build & Create v6.apk
+
+- Run `flutter clean` to remove all cached build artifacts
+- Delete corrupted Kotlin caches: `android\.gradle`, `android\.kotlin`, `build\` directories
+- Run `flutter pub get`
+- Run `flutter build apk --release`
+- Copy the output APK to `d:\Traffic Safety Mobile App\v6.apk`
+
+## Verification Plan
+
+### Automated Tests
+- `C:\flutter\bin\flutter.bat build apk --release` — must succeed without errors
+
+### Manual Verification
+- APK file exists at `d:\Traffic Safety Mobile App\v6.apk`
+- APK size is reasonable (should be ~30-70 MB with the TFLite model)
